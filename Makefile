@@ -14,9 +14,13 @@
 
 GOPATH?=$(shell go env GOPATH)
 
-# make binaries
-BINARIES=edgemesh
+# make all builds both agent and server binaries
 
+BINARIES=edgemesh-agent \
+         edgemesh-server
+
+COMPONENTS=agent \
+           server
 
 .EXPORT_ALL_VARIABLES:
 OUT_DIR ?= _output/local
@@ -33,8 +37,8 @@ define ALL_HELP_INFO
 #   make
 #   make all
 #   make all HELP=y
-#   make all WHAT=edgemesh
-#   make all WHAT=edgemesh GOLDFLAGS="" GOGCFLAGS="-N -l"
+#   make all WHAT=edgemesh-agent
+#   make all WHAT=edgemesh-agent GOLDFLAGS="" GOGCFLAGS="-N -l"
 #     Note: Specify GOLDFLAGS as an empty string for building unstripped binaries, specify GOGCFLAGS
 #     to "-N -l" to disable optimizations and inlining, this will be helpful when you want to
 #     use the debugging tools like delve. When GOLDFLAGS is unspecified, it defaults to "-s -w" which strips
@@ -92,6 +96,24 @@ lint:
 	hack/make-rules/lint.sh
 endif
 
+define E2E_HELP_INFO
+# e2e test.
+#
+# Example:
+#   make e2e
+#   make e2e HELP=y
+#
+endef
+.PHONY: e2e
+ifeq ($(HELP),y)
+e2e:
+	@echo "$$E2E_HELP_INFO"
+else
+e2e:
+#	This has been commented temporarily since there is an issue of CI using same master for all PRs, which is causing failures when run parallelly
+	tests/e2e/scripts/execute.sh
+endif
+
 
 define CLEAN_HELP_INFO
 # Clean up the output of make.
@@ -111,10 +133,12 @@ clean:
 endif
 
 
+ARCH ?= amd64
 IMAGE_TAG ?= $(shell git describe --tags)
 GO_LDFLAGS='$(shell hack/make-rules/version.sh)'
 
-.PHONY: images
-images:
-	docker build --build-arg GO_LDFLAGS=${GO_LDFLAGS} -t kubeedge/edgemesh:${IMAGE_TAG} -f build/Dockerfile .
+.PHONY: images agentimage serverimage
+images: agentimage serverimage
+agentimage serverimage:
+	docker build --build-arg GO_LDFLAGS=${GO_LDFLAGS} -t kubeedge/edgemesh-${@:image=}:${IMAGE_TAG} -f build/${@:image=}/Dockerfile .
 
