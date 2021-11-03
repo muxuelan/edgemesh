@@ -1,0 +1,19 @@
+image: kubeedge/edgemesh-server:latest
+nodeName: "your node name"
+# publicIP overwrites the value of modules.tunnel.publicIP
+publicIP: ""
+
+# edgemesh-server configmap
+apiVersion: server.edgemesh.config.kubeedge.io/v1alpha1
+kind: EdgeMeshServer
+kubeAPIConfig:
+  burst: 200
+  contentType: application/vnd.kubernetes.protobuf
+  kubeConfig: ""
+  master: ""
+  qps: 100
+modules:
+  tunnel:
+    enable: true
+    listenPort: 20004
+    publicIP: ""

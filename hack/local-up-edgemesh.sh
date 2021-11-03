@@ -43,7 +43,9 @@ IMAGE_TAG=localup
 
 CLUSTER_NAME=test
 MASTER_NODENAME=${CLUSTER_NAME}-control-plane
+HOST_IP=`hostname -I | awk '{print $1}'`
 EDGE_NODENAME=edge-node
+KUBEEDGE_VERSION=1.8.2
 NAMESPACE=kubeedge
 LOG_DIR=${LOG_DIR:-"/tmp"}
 TIMEOUT=${TIMEOUT:-120}s
@@ -92,7 +94,7 @@ localup_kubeedge() {
   # init cloudcore
   add_cleanup 'rm `ls /etc/kubeedge | grep -v "kubeedge"` -rf'
   add_cleanup 'sudo -E keadm reset --force --kube-config=${KUBECONFIG}'
-  sudo -E keadm init --advertise-address=127.0.0.1 --kubeedge-version=1.7.2 --kube-config=${KUBECONFIG}
+  sudo -E keadm init --advertise-address=${HOST_IP} --kubeedge-version=${KUBEEDGE_VERSION} --kube-config=${KUBECONFIG}
 
   # ensure tokensecret is generated
   for ((i=1;i<20;i++)) ; do
@@ -109,7 +111,7 @@ localup_kubeedge() {
 
   # turn off edgemesh and turn on list-watch featuren and resart edgeocre
   export CHECK_EDGECORE_ENVIRONMENT="false"
-  sudo -E keadm join --cloudcore-ipport=127.0.0.1:10000 --kubeedge-version=1.7.2 --token=${token} --edgenode-name=${EDGE_NODENAME}
+  sudo -E keadm join --cloudcore-ipport=${HOST_IP}:10000 --kubeedge-version=${KUBEEDGE_VERSION} --token=${token} --edgenode-name=${EDGE_NODENAME}
 
   EDGE_BIN=/usr/local/bin/edgecore
   EDGE_CONFIGFILE=/etc/kubeedge/config/edgecore.yaml
@@ -219,6 +221,9 @@ data:
       tunnel:
         enable: true
         publicIP: ${MASTER_IP}
+        enableSecurity: true
+        ACL:
+          httpServer: https://${HOST_IP}:10002
 EOF
 
   # create deployment
@@ -256,7 +261,7 @@ spec:
               fieldRef:
                 fieldPath: spec.nodeName
         ports:
-        - containerPort: 10004
+        - containerPort: 20004
           name: relay
           protocol: TCP
         resources:
@@ -271,6 +276,8 @@ spec:
             mountPath: /etc/kubeedge/config
           - name: edgemesh
             mountPath: /etc/kubeedge/edgemesh
+          - name: ca-server-token
+            mountPath: /etc/kubeedge/cert
       restartPolicy: Always
       serviceAccountName: edgemesh-server
       volumes:
@@ -281,6 +288,9 @@ spec:
           hostPath:
             path: /etc/kubeedge/edgemesh
             type: DirectoryOrCreate
+        - name: ca-server-token
+          secret:
+            secretName: tokensecret
 EOF
 
 echo "wait the edgemesh-server pod ready"
@@ -332,12 +342,9 @@ data:
     modules:
       edgeDNS:
         enable: true
-        listenInterface: docker0
         listenPort: 53
       edgeProxy:
         enable: true
-        subNet: 10.96.0.0/12
-        listenInterface: docker0
         listenPort: 40001
       edgeGateway:
         enable: false
@@ -346,7 +353,10 @@ data:
         excludeIP: "*"
       tunnel:
         enable: true
-        listenPort: 10006
+        listenPort: 20006
+        enableSecurity: true
+        ACL:
+          httpServer: https://${HOST_IP}:10002
 EOF
 
   sleep 5
@@ -377,10 +387,10 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
               - matchExpressions:
-                  - key: node-role.kubernetes.io/edge
-                    operator: Exists
-                  - key: node-role.kubernetes.io/agent
-                    operator: Exists
+                - key: node-role.kubernetes.io/edge
+                  operator: Exists
+                - key: node-role.kubernetes.io/agent
+                  operator: Exists
       hostNetwork: true
       containers:
         - name: edgemesh-agent
@@ -409,6 +419,8 @@ spec:
               mountPath: /etc/kubeedge/edgemesh
             - name: kubeconfig
               mountPath: /etc/kubeedge/kubeconfig
+            - name: ca-server-token
+              mountPath: /etc/kubeedge/cert
       volumes:
         - name: conf
           configMap:
@@ -423,16 +435,51 @@ spec:
         - name: kubeconfig
           hostPath:
             path: ${KUBECONFIG}
+        - name: ca-server-token
+          secret:
+            secretName: tokensecret
 EOF
   sleep 15
   kubectl get pod -n kubeedge -o wide
   echo "wait the edgemesh pod ready"
   kubectl wait --timeout=${TIMEOUT} --for=condition=Ready pod -l kubeedge=edgemesh-agent -n kubeedge
 
+  # since the environment provided by github actions has not been able to normally write nameserver to /etc/resolv.conf,
+  # this ugly method is used to avoid the problem. (I'll come back to deal with this problem later when I free) @Poorunga
+  write_nameserver
+  sleep 3
+
   # print edgemesh iptables rules
   sudo iptables-save | grep EDGE-MESH
 
   add_debug_info "See edgemesh status: kubectl get ds -n $NAMESPACE $edgemesh_ds_name"
+}
+
+write_nameserver() {
+  sudo chown $USER:$USER /etc/resolv.conf
+  cat >/etc/resolv.conf<<EOF
+# This file is managed by man:systemd-resolved(8). Do not edit.
+#
+# This is a dynamic resolv.conf file for connecting local clients to the
++ sleep 5
+# internal DNS stub resolver of systemd-resolved. This file lists all
+# configured search domains.
+#
+# Run "resolvectl status" to see details about the uplink DNS servers
+# currently in use.
+#
+# Third party programs must not access this file directly, but only through the
+# symlink at /etc/resolv.conf. To manage man:resolv.conf(5) in a different way,
+# replace this symlink by a static file or a different symlink.
+#
+# See man:systemd-resolved.service(8) for details about the supported modes of
+# operation for /etc/resolv.conf.
+
+nameserver 169.254.96.16
+nameserver 127.0.0.53
+options edns0 trust-ad
+search ild0l4k5vsluppoevu2oqvhmda.cx.internal.cloudapp.net
+EOF
 }
 
 declare -a CLEANUP_CMDS=()

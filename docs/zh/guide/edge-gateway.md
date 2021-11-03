@@ -7,13 +7,16 @@ EdgeMesh 的边缘网关提供了通过网关的方式访问集群内部服务�
 ## 部署
 
 ```shell
-$ kubectl apply -f build/agent/kubernetes/edgemesh-gateway/03-configmap.yaml
-$ kubectl apply -f build/agent/kubernetes/edgemesh-gateway/04-deployment.yaml
+$ kubectl apply -f build/agent/kubernetes/edgemesh-gateway/
+namespace/kubeedge unchanged
+configmap/edgemesh-gateway-cfg created
+deployment.apps/edgemesh-gateway created
 ```
 
-::: tip
-边缘网关与 Agent 使用相同的 [镜像](https://hub.docker.com/r/kubeedge/edgemesh-agent)，只在配置上有细微区别。
+::: warning
+请根据你的 K8s 集群设置 03-deployment.yaml 的 nodeName，否则 edgemesh-gateway 可能无法运行
 :::
+
 
 ## HTTP 网关
 
@@ -21,18 +24,17 @@ $ kubectl apply -f build/agent/kubernetes/edgemesh-gateway/04-deployment.yaml
 
 ```shell
 $ kubectl apply -f examples/hostname-lb-random-gateway.yaml
-pod/hostname-lb-edge2 created
-pod/hostname-lb-edge3 created
+deployment.apps/hostname-lb-edge created
 service/hostname-lb-svc created
-gateway.networking.istio.io/edgemesh-gateway configured
-destinationrule.networking.istio.io/hostname-lb-edge created
+gateway.networking.istio.io/edgemesh-gateway created
+destinationrule.networking.istio.io/hostname-lb-svc created
 virtualservice.networking.istio.io/edgemesh-gateway-svc created
 ```
 
 **查看 edgemesh-gateway 是否创建成功**
 
 ```shell
-$ kubectl get gw -n edgemesh-test
+$ kubectl get gw
 NAME               AGE
 edgemesh-gateway   3m30s
 ```
@@ -40,7 +42,7 @@ edgemesh-gateway   3m30s
 **最后，使用 IP 和 Gateway 暴露的端口来进行访问**
 
 ```shell
-$ curl 192.168.0.211:12345
+$ curl 192.168.0.211:23333
 ```
 
 ## HTTPS 网关
@@ -59,7 +61,7 @@ writing new private key to 'tls.key'
 **根据密钥文件创建 Secret 资源对象**
 
 ```bash
-$ kubectl create secret tls gw-secret --key tls.key --cert tls.crt -n edgemesh-test
+$ kubectl create secret tls gw-secret --key tls.key --cert tls.crt
 secret/gw-secret created
 ```
 
@@ -67,16 +69,15 @@ secret/gw-secret created
 
 ```bash
 $ kubectl apply -f examples/hostname-lb-random-gateway-tls.yaml
-pod/hostname-lb-edge2 created
-pod/hostname-lb-edge3 created
+deployment.apps/hostname-lb-edge created
 service/hostname-lb-svc created
-gateway.networking.istio.io/edgemesh-gateway configured
-destinationrule.networking.istio.io/hostname-lb-edge created
+gateway.networking.istio.io/edgemesh-gateway created
+destinationrule.networking.istio.io/hostname-lb-svc created
 virtualservice.networking.istio.io/edgemesh-gateway-svc created
 ```
 
 **最后，使用证书进行 HTTPS 访问**
 
 ```bash
-$ curl -k --cert ./tls.crt --key ./tls.key https://192.168.0.129:12345
+$ curl -k --cert ./tls.crt --key ./tls.key https://192.168.0.129:23333
 ```

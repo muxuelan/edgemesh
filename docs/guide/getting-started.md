@@ -10,6 +10,67 @@
 EdgeMesh relies on the [List-Watch](https://github.com/kubeedge/kubeedge/blob/master/CHANGELOG/CHANGELOG-1.6.md) function of KubeEdge. KubeEdge v1.6+ starts to support this function until KubeEdge v1.7+ tends to be stable
 :::
 
+## Helm Installation
+
+- **Step 1**: Download EdgeMesh
+
+```shell
+$ git clone https://github.com/kubeedge/edgemesh.git
+$ cd edgemesh
+```
+
+- **Step 2**: Install Charts
+
+Make sure you have installed Helm 3
+
+```
+helm install edgemesh \
+  --set server.nodeName=<your node name> \
+  --set server.publicIP=<your node eip> \
+  build/helm/edgemesh
+```
+
+server.nodeName specifies the node deployed by edgemesh-server, and server.publicIP specifies the public IP of the node. The server.publicIP can be omitted, because edgemesh-server will automatically detect and configure the public IP of the node, but it is not guaranteed to be correct.
+
+**Example：**
+
+```shell
+helm install edgemesh \
+  --set server.nodeName=k8s-node1 \
+  --set server.publicIP=119.8.211.54 \
+  build/helm/edgemesh
+```
+
+::: warning
+Please set server.nodeName and server.publicIP according to your K8s cluster, otherwise edgemesh-server may not run
+:::
+
+- **Step 3**: Check it out
+
+```shell
+$ helm ls
+NAME            NAMESPACE       REVISION        UPDATED                                 STATUS          CHART           APP VERSION
+edgemesh        default         1               2021-11-01 23:30:02.927346553 +0800 CST deployed        edgemesh-0.1.0  1.8.0
+```
+
+```shell
+$ kubectl get all -n kubeedge
+NAME                                   READY   STATUS    RESTARTS   AGE
+pod/edgemesh-agent-4rhz4               1/1     Running   0          76s
+pod/edgemesh-agent-7wqgb               1/1     Running   0          76s
+pod/edgemesh-agent-9c697               1/1     Running   0          76s
+pod/edgemesh-server-5f6d5869ff-4568p   1/1     Running   0          5m8s
+
+NAME                            DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+daemonset.apps/edgemesh-agent   3         3         3       3            3           <none>          76s
+
+NAME                              READY   UP-TO-DATE   AVAILABLE   AGE
+deployment.apps/edgemesh-server   1/1     1            1           5m8s
+
+NAME                                         DESIRED   CURRENT   READY   AGE
+replicaset.apps/edgemesh-server-5f6d5869ff   1         1         1       5m8s
+```
+
 ## Manual Installation
 
 - **Step 1**: Download EdgeMesh
@@ -27,7 +88,7 @@ $ kubectl apply -f build/crds/istio/
 
 - **Step 3**: Enable List-Watch
 
-At the edge node, close edgeMesh module, open metaServer module, and restart edgecore
+At the edge node, open metaServer module (if your KubeEdge < 1.8.0, you also need to close edgeMesh module), and restart edgecore
 
 ```shell
 $ vim /etc/kubeedge/config/edgecore.yaml
@@ -71,61 +132,47 @@ $ curl 127.0.0.1:10550/api/v1/services
 - **Step 4**: Deploy edgemesh-server
 
 ```shell
-$ kubectl apply -f build/server/edgemesh/02-serviceaccount.yaml
-$ kubectl apply -f build/server/edgemesh/03-clusterrole.yaml
-$ kubectl apply -f build/server/edgemesh/04-clusterrolebinding.yaml
-# Please set the value of 05-configmap's publicIP to the node's public IP so that edge nodes can access it.
-$ kubectl apply -f build/server/edgemesh/05-configmap.yaml
-$ kubectl apply -f build/server/edgemesh/06-deployment.yaml
+$ kubectl apply -f build/server/edgemesh/
+namespace/kubeedge configured
+serviceaccount/edgemesh-server created
+clusterrole.rbac.authorization.k8s.io/edgemesh-server created
+clusterrolebinding.rbac.authorization.k8s.io/edgemesh-server created
+configmap/edgemesh-server-cfg created
+deployment.apps/edgemesh-server created
 ```
 
-- **Step 5**: Get K8s serviceCIDR
-```shell
-$ kubectl cluster-info dump | grep -m 1 service-cluster-ip-range
-    "--service-cluster-ip-range=10.96.0.0/12",
-```
-
-::: tip
-The next steps need to fill serviceCIDR into the corresponding configmap YAML.
+::: warning
+Please set the value of 05-configmap.yaml's publicIP and 06-deployment.yaml's nodeName according to your K8s cluster, otherwise edgemesh-server may not run
 :::
 
-- **Step 6**: Deploy edgemesh-agent-cloud
+- **Step 5**: Deploy edgemesh-agent
 
 ```shell
-$ kubectl apply -f build/agent/kubernetes/edgemesh-agent/03-serviceaccount.yaml
-$ kubectl apply -f build/agent/kubernetes/edgemesh-agent/04-clusterrole.yaml
-$ kubectl apply -f build/agent/kubernetes/edgemesh-agent/05-clusterrolebinding.yaml
-# Please set the subNet to the value of service-cluster-ip-range of kube-apiserver
-$ kubectl apply -f build/agent/kubernetes/edgemesh-agent/06-configmap-cloud.yaml
-$ kubectl apply -f build/agent/kubernetes/edgemesh-agent/07-daemonset-cloud.yaml
+$ kubectl apply -f build/agent/kubernetes/edgemesh-agent/
+namespace/kubeedge configured
+serviceaccount/edgemesh-agent created
+clusterrole.rbac.authorization.k8s.io/edgemesh-agent created
+clusterrolebinding.rbac.authorization.k8s.io/edgemesh-agent created
+configmap/edgemesh-agent-cfg created
+daemonset.apps/edgemesh-agent created
 ```
 
-- **Step 7**: Deploy edgemesh-agent-edge
-
-```shell
-# Please set the subNet to the value of service-cluster-ip-range of kube-apiserver
-$ kubectl apply -f build/agent/kubernetes/edgemesh-agent/06-configmap-edge.yaml
-$ kubectl apply -f build/agent/kubernetes/edgemesh-agent/07-daemonset-edge.yaml
-```
-
-- **Step 7**: Check it out
+- **Step 6**: Check it out
 
 ```shell
 $ kubectl get all -n kubeedge
 NAME                                   READY   STATUS    RESTARTS   AGE
-pod/edgemesh-agent-cloud-pcphk         1/1     Running   0          19h
-pod/edgemesh-agent-cloud-qkcpx         1/1     Running   0          19h
-pod/edgemesh-agent-edge-b4hf7          1/1     Running   0          19h
-pod/edgemesh-agent-edge-ktl6b          1/1     Running   0          19h
-pod/edgemesh-server-7f97d77469-dml4j   1/1     Running   0          2d21h
+pod/edgemesh-agent-4rhz4               1/1     Running   0          76s
+pod/edgemesh-agent-7wqgb               1/1     Running   0          76s
+pod/edgemesh-agent-9c697               1/1     Running   0          76s
+pod/edgemesh-server-5f6d5869ff-4568p   1/1     Running   0          5m8s
 
-NAME                                  DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
-daemonset.apps/edgemesh-agent-cloud   2         2         2       2            2           <none>          19h
-daemonset.apps/edgemesh-agent-edge    2         2         2       2            2           <none>          19h
+NAME                            DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+daemonset.apps/edgemesh-agent   3         3         3       3            3           <none>          76s
 
 NAME                              READY   UP-TO-DATE   AVAILABLE   AGE
-deployment.apps/edgemesh-server   1/1     1            1           2d21h
+deployment.apps/edgemesh-server   1/1     1            1           5m8s
 
 NAME                                         DESIRED   CURRENT   READY   AGE
-replicaset.apps/edgemesh-server-7f97d77469   1         1         1       2d21h
+replicaset.apps/edgemesh-server-5f6d5869ff   1         1         1       5m8s
 ```

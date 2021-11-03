@@ -12,23 +12,27 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	utiliptables "k8s.io/kubernetes/pkg/util/iptables"
 	utilexec "k8s.io/utils/exec"
 
 	beehiveContext "github.com/kubeedge/beehive/pkg/core/context"
+	"github.com/kubeedge/edgemesh/agent/pkg/proxy/controller"
 	"github.com/kubeedge/edgemesh/agent/pkg/proxy/protocol"
 	"github.com/kubeedge/edgemesh/common/util"
 )
 
 const (
-	meshRootChain        utiliptables.Chain = "EDGE-MESH"
-	None                                    = "None"
-	labelCoreDNS                            = "k8s-app=kube-dns"
-	labelNoProxyEdgeMesh                    = "noproxy=edgemesh"
+	meshRootChain utiliptables.Chain = "EDGE-MESH"
+	None          string             = "None"
+	labelKubeDNS  string             = "k8s-app=kube-dns"
+	labelNoProxy  string             = "noproxy=edgemesh"
 )
 
-type iptablesEnsureInfo struct {
+// iptablesJumpChain encapsulates the iptables rule information,
+// copy from https://github.com/kubernetes/kubernetes/blob/release-1.18/pkg/proxy/iptables/proxier.go#L368
+type iptablesJumpChain struct {
 	table     utiliptables.Table
 	dstChain  utiliptables.Chain
 	srcChain  utiliptables.Chain
@@ -36,7 +40,7 @@ type iptablesEnsureInfo struct {
 	extraArgs []string
 }
 
-var rootJumpChains = []iptablesEnsureInfo{
+var rootJumpChains = []iptablesJumpChain{
 	{utiliptables.TableNAT, meshRootChain, utiliptables.ChainOutput, "edgemesh root chain", nil},
 	{utiliptables.TableNAT, meshRootChain, utiliptables.ChainPrerouting, "edgemesh root chain", nil},
 }
@@ -54,13 +58,10 @@ type Proxier struct {
 	protoProxies []protocol.ProtoProxy
 
 	// iptables rules
-	ignoreRules []iptablesEnsureInfo
-	proxyRules  []iptablesEnsureInfo
-	dnatRules   []iptablesEnsureInfo
-
-	invalidIgnoreRules []iptablesEnsureInfo
-	invalidProxyRules  []iptablesEnsureInfo
-	invalidDNATRules   []iptablesEnsureInfo
+	ignoreRules        []iptablesJumpChain
+	expiredIgnoreRules []iptablesJumpChain
+	proxyRules         []iptablesJumpChain
+	dnatRules          []iptablesJumpChain
 }
 
 func NewProxier(subnet string, protoProxies []protocol.ProtoProxy, kubeClient kubernetes.Interface) (proxier *Proxier, err error) {
@@ -72,16 +73,20 @@ func NewProxier(subnet string, protoProxies []protocol.ProtoProxy, kubeClient ku
 		kubeClient:         kubeClient,
 		serviceCIDR:        subnet,
 		protoProxies:       protoProxies,
-		ignoreRules:        make([]iptablesEnsureInfo, 0),
-		proxyRules:         make([]iptablesEnsureInfo, 2),
-		dnatRules:          make([]iptablesEnsureInfo, 2),
-		invalidIgnoreRules: make([]iptablesEnsureInfo, 0),
+		ignoreRules:        make([]iptablesJumpChain, 0),
+		expiredIgnoreRules: make([]iptablesJumpChain, 0),
+		proxyRules:         make([]iptablesJumpChain, 2),
+		dnatRules:          make([]iptablesJumpChain, 2),
 	}
 
 	// iptables rule cleaning and writing
 	proxier.CleanResidue()
 	proxier.FlushRules()
 	proxier.EnsureRules()
+
+	// set iptables-auto-flush event handler funcs
+	controller.APIConn.SetServiceEventHandlers("iptables-auto-flush", cache.ResourceEventHandlerFuncs{
+		AddFunc: proxier.svcAdd, UpdateFunc: proxier.svcUpdate, DeleteFunc: proxier.svcDelete})
 
 	return proxier, nil
 }
@@ -102,7 +107,7 @@ func (proxier *Proxier) Start() {
 	}()
 }
 
-func (proxier *Proxier) ignoreRuleByService(svc *corev1.Service) iptablesEnsureInfo {
+func (proxier *Proxier) ignoreRuleByService(svc *corev1.Service) iptablesJumpChain {
 	var (
 		ruleExtraArgs = func(svc *corev1.Service) []string {
 			// Headless Service
@@ -131,10 +136,10 @@ func (proxier *Proxier) ignoreRuleByService(svc *corev1.Service) iptablesEnsureI
 		}
 
 		ruleComment = func(svc *corev1.Service) string {
-			return fmt.Sprintf("ignore %s.%s service", svc.Name, svc.Namespace)
+			return fmt.Sprintf("ignore %s/%s service", svc.Namespace, svc.Name)
 		}
 	)
-	return iptablesEnsureInfo{
+	return iptablesJumpChain{
 		table:     utiliptables.TableNAT,
 		dstChain:  "RETURN", // return parent chain
 		srcChain:  meshRootChain,
@@ -143,59 +148,61 @@ func (proxier *Proxier) ignoreRuleByService(svc *corev1.Service) iptablesEnsureI
 	}
 }
 
-// createIgnoreRules exclude some services that must be ignored
-func (proxier *Proxier) createIgnoreRules() (ignoreRules, invalidIgnoreRules []iptablesEnsureInfo, err error) {
+// createIgnoreRules exclude some services that must be ignored.
+// The following services are ignored by default:
+//   - kubernetes.default
+//   - coredns.kube-system
+//   - kube-dns.kube-system
+// In addition, services labeled with noproxy=edgemesh will also be ignored.
+func (proxier *Proxier) createIgnoreRules() (ignoreRules, expiredIgnoreRules []iptablesJumpChain, err error) {
 	ignoreRulesIptablesEnsureMap := make(map[string]*corev1.Service)
-	// kube-apiserver service
-	kubeAPI, err := proxier.kubeClient.CoreV1().Services("default").Get(context.Background(), "kubernetes", metav1.GetOptions{})
-	if err != nil {
-		return
-	}
-	ignoreRulesIptablesEnsureMap[strings.Join([]string{kubeAPI.Namespace, kubeAPI.Name}, ".")] = kubeAPI
 
-	// kube-dns service
-	kubeDNS, err := proxier.kubeClient.CoreV1().Services("kube-system").Get(context.Background(), "kube-dns", metav1.GetOptions{})
-	if err != nil {
-		klog.Warningf("get kube-dns service failed, your cluster may be not have kube-dns service: %s", err)
-	}
-	if kubeDNS != nil && err == nil {
-		klog.V(4).Infof("ignored kubeDNS: %s", kubeDNS.Name)
-		ignoreRulesIptablesEnsureMap[strings.Join([]string{kubeDNS.Namespace, kubeDNS.Name}, ".")] = kubeDNS
+	// kubernetes(kube-apiserver) service
+	kubeAPI, err := proxier.kubeClient.CoreV1().Services("default").Get(context.Background(), "kubernetes", metav1.GetOptions{})
+	if err != nil && !util.IsNotFoundError(err) {
+		klog.Warningf("failed to get kubernetes.default service, err: %v", err)
+	} else if err == nil {
+		ignoreRulesIptablesEnsureMap[strings.Join([]string{kubeAPI.Namespace, kubeAPI.Name}, ".")] = kubeAPI
 	}
 
 	// coredns service
-	kubeDNSList, err := proxier.kubeClient.CoreV1().Services("kube-system").List(context.Background(), metav1.ListOptions{LabelSelector: labelCoreDNS})
-	if err != nil {
-		klog.Warningf("get coredns service failed, your cluster may be not have coredns service: %s", err)
+	coreDNS, err := proxier.kubeClient.CoreV1().Services("kube-system").Get(context.Background(), "coredns", metav1.GetOptions{})
+	if err != nil && !util.IsNotFoundError(err) {
+		klog.Warningf("failed to get coredns.kube-system service, err: %v", err)
+	} else if err == nil {
+		ignoreRulesIptablesEnsureMap[strings.Join([]string{coreDNS.Namespace, coreDNS.Name}, ".")] = coreDNS
 	}
-	if err == nil && kubeDNSList != nil && len(kubeDNSList.Items) > 0 {
+
+	// kube-dns service
+	kubeDNSList, err := proxier.kubeClient.CoreV1().Services("kube-system").List(context.Background(), metav1.ListOptions{LabelSelector: labelKubeDNS})
+	if err != nil && !util.IsNotFoundError(err) {
+		klog.Warningf("failed to list service labeled with k8s-app=kube-dns, err: %v", err)
+	} else if err == nil {
 		for _, item := range kubeDNSList.Items {
-			coreDNS := item
-			klog.V(4).Infof("ignored containing k8s-app=kube-dns label service: %s", coreDNS.Name)
-			ignoreRulesIptablesEnsureMap[strings.Join([]string{item.Namespace, item.Name}, ".")] = &coreDNS
+			klog.V(4).Infof("ignored containing k8s-app=kube-dns label service: %s", item.Name)
+			ignoreRulesIptablesEnsureMap[strings.Join([]string{item.Namespace, item.Name}, ".")] = &item
 		}
 	}
 
-	// Other services we want to ignore...
-	otherIgnoreServiceList, err := proxier.kubeClient.CoreV1().Services("").List(context.Background(), metav1.ListOptions{LabelSelector: labelNoProxyEdgeMesh})
-	if err != nil {
-		klog.Warningf("get Other ignore service failed: %s", err)
-	}
-	if err == nil && otherIgnoreServiceList != nil && len(otherIgnoreServiceList.Items) > 0 {
+	// Other services we want to ignore(which service has noproxy=edgemesh label)...
+	otherIgnoreServiceList, err := proxier.kubeClient.CoreV1().Services("").List(context.Background(), metav1.ListOptions{LabelSelector: labelNoProxy})
+	if err != nil && !util.IsNotFoundError(err) {
+		klog.Warningf("failed to list service labeled with noproxy=edgemesh, err: %v", err)
+	} else if err == nil {
 		for _, item := range otherIgnoreServiceList.Items {
-			otherIgnoreService := item
-			klog.V(4).Infof("ignored containing noproxy=edgemesh label service: %s", otherIgnoreService.Name)
-			ignoreRulesIptablesEnsureMap[strings.Join([]string{item.Namespace, item.Name}, ".")] = &otherIgnoreService
+			klog.V(4).Infof("ignored containing noproxy=edgemesh label service: %s", item.Name)
+			ignoreRulesIptablesEnsureMap[strings.Join([]string{item.Namespace, item.Name}, ".")] = &item
 		}
 	}
 
 	for _, service := range ignoreRulesIptablesEnsureMap {
 		ignoreRules = append(ignoreRules, proxier.ignoreRuleByService(service))
 	}
-	// The go-funk library is used here for set operations and comparisons
+
+	// we need to find out the ignore rules that has expired
 	for _, haveIgnoredRule := range proxier.ignoreRules {
 		if !funk.Contains(ignoreRules, haveIgnoredRule) {
-			invalidIgnoreRules = append(invalidIgnoreRules, haveIgnoredRule)
+			expiredIgnoreRules = append(expiredIgnoreRules, haveIgnoredRule)
 		}
 	}
 
@@ -203,7 +210,7 @@ func (proxier *Proxier) createIgnoreRules() (ignoreRules, invalidIgnoreRules []i
 }
 
 // createProxyRules get proxy rules and DNAT rules
-func (proxier *Proxier) createProxyRules() (proxyRules, dnatRules []iptablesEnsureInfo) {
+func (proxier *Proxier) createProxyRules() (proxyRules, dnatRules []iptablesJumpChain) {
 	var (
 		newChainName utiliptables.Chain
 
@@ -226,14 +233,14 @@ func (proxier *Proxier) createProxyRules() (proxyRules, dnatRules []iptablesEnsu
 
 	for _, proto := range proxier.protoProxies {
 		newChainName = proxyChainName(proto.GetName())
-		proxyRules = append(proxyRules, iptablesEnsureInfo{
+		proxyRules = append(proxyRules, iptablesJumpChain{
 			table:     utiliptables.TableNAT,
 			dstChain:  newChainName,
 			srcChain:  meshRootChain,
 			comment:   proxyRuleComment(proto.GetName()),
 			extraArgs: proxyRuleArgs(proto.GetName()),
 		})
-		dnatRules = append(dnatRules, iptablesEnsureInfo{
+		dnatRules = append(dnatRules, iptablesJumpChain{
 			table:     utiliptables.TableNAT,
 			dstChain:  "DNAT",
 			srcChain:  newChainName,
@@ -244,7 +251,7 @@ func (proxier *Proxier) createProxyRules() (proxyRules, dnatRules []iptablesEnsu
 	return
 }
 
-// ensureRule ensures iptables rules exist
+// EnsureRules ensures iptables rules exist
 func (proxier *Proxier) EnsureRules() {
 	var err error
 	proxier.mu.Lock()
@@ -267,23 +274,23 @@ func (proxier *Proxier) EnsureRules() {
 	}
 
 	// recollect need to ignore rules
-	proxier.ignoreRules, proxier.invalidIgnoreRules, err = proxier.createIgnoreRules()
+	proxier.ignoreRules, proxier.expiredIgnoreRules, err = proxier.createIgnoreRules()
 	if err != nil {
 		klog.Errorf("failed to create ignore rules: %v", err)
 	} else {
 		klog.V(5).Infof("ignore rules: %v", proxier.ignoreRules)
 	}
 
-	// clean the invalid ignore rules
-	err = proxier.setIgnoreRules("Delete", proxier.invalidIgnoreRules)
+	// clean expired ignore rules
+	err = proxier.setIgnoreRules("Delete", proxier.expiredIgnoreRules)
 	if err != nil {
 		klog.Errorf("clean the invalid ignore rules failed: %s", err)
 		return
 	} else {
-		klog.V(5).Infof("clean %d invalid ignore rules.", len(proxier.invalidIgnoreRules))
+		klog.V(5).Infof("clean %d invalid ignore rules.", len(proxier.expiredIgnoreRules))
 	}
 
-	// ensure ignore rules
+	// ensure new ignore rules
 	err = proxier.setIgnoreRules("Ensure", proxier.ignoreRules)
 	if err != nil {
 		klog.Errorf("ensure ignore rules failed: %s", err)
@@ -323,7 +330,7 @@ func (proxier *Proxier) EnsureRules() {
 }
 
 // setIgnoreRules Delete and Ensure ignore rule for EDGE-MESH chain
-func (proxier *Proxier) setIgnoreRules(ruleSetType string, ignoreRules []iptablesEnsureInfo) (err error) {
+func (proxier *Proxier) setIgnoreRules(ruleSetType string, ignoreRules []iptablesJumpChain) (err error) {
 	for _, ignoreRule := range ignoreRules {
 		if ignoreRule.extraArgs[0] == None {
 			headLessIps := ignoreRule.extraArgs[1:]
@@ -374,13 +381,13 @@ func (proxier *Proxier) FlushRules() {
 
 	// flush root chain
 	if err := proxier.iptables.FlushChain(utiliptables.TableNAT, meshRootChain); err != nil {
-		klog.V(4).Error(err, "Failed flush root chain %s", meshRootChain)
+		klog.V(4).ErrorS(err, "Failed flush root chain %s", meshRootChain)
 	}
 
 	// flush proxy chains
 	for _, rule := range proxier.proxyRules {
 		if err := proxier.iptables.FlushChain(rule.table, rule.dstChain); err != nil {
-			klog.V(4).Error(err, "Failed flush proxy chain %s", rule.dstChain)
+			klog.V(4).ErrorS(err, "Failed flush proxy chain %s", rule.dstChain)
 		}
 	}
 }
@@ -393,10 +400,10 @@ func (proxier *Proxier) CleanResidue() {
 	// clean up non-interface iptables rules
 	nonIfiRuleArgs := strings.Split(fmt.Sprintf("-p tcp -d %s -j EDGE-MESH", proxier.serviceCIDR), " ")
 	if err := proxier.iptables.DeleteRule(utiliptables.TableNAT, utiliptables.ChainPrerouting, nonIfiRuleArgs...); err != nil {
-		klog.V(4).Error(err, "Failed clean residual non-interface rule %v", nonIfiRuleArgs)
+		klog.V(4).ErrorS(err, "Failed clean residual non-interface rule %v", nonIfiRuleArgs)
 	}
 	if err := proxier.iptables.DeleteRule(utiliptables.TableNAT, utiliptables.ChainOutput, nonIfiRuleArgs...); err != nil {
-		klog.V(4).Error(err, "Failed clean residual non-interface rule %v", nonIfiRuleArgs)
+		klog.V(4).ErrorS(err, "Failed clean residual non-interface rule %v", nonIfiRuleArgs)
 	}
 
 	// clean up interface iptables rules
@@ -404,11 +411,11 @@ func (proxier *Proxier) CleanResidue() {
 	for _, ifi := range ifiList {
 		inboundRuleArgs := strings.Split(fmt.Sprintf("-p tcp -d %s -i %s -j EDGE-MESH", proxier.serviceCIDR, ifi), " ")
 		if err := proxier.iptables.DeleteRule(utiliptables.TableNAT, utiliptables.ChainPrerouting, inboundRuleArgs...); err != nil {
-			klog.V(4).Error(err, "Failed clean residual inbound rule %v", inboundRuleArgs)
+			klog.V(4).ErrorS(err, "Failed clean residual inbound rule %v", inboundRuleArgs)
 		}
 		outboundRuleAgrs := strings.Split(fmt.Sprintf("-p tcp -d %s -o %s -j EDGE-MESH", proxier.serviceCIDR, ifi), " ")
 		if err := proxier.iptables.DeleteRule(utiliptables.TableNAT, utiliptables.ChainOutput, outboundRuleAgrs...); err != nil {
-			klog.V(4).Error(err, "Failed clean residual outbound rule %v", outboundRuleAgrs)
+			klog.V(4).ErrorS(err, "Failed clean residual outbound rule %v", outboundRuleAgrs)
 		}
 	}
 
@@ -424,8 +431,12 @@ func (proxier *Proxier) CleanResidue() {
 		if gw, err := util.GetInterfaceIP(ifi); err == nil {
 			route := netlink.Route{Dst: dst, Gw: gw}
 			if err := netlink.RouteDel(&route); err != nil {
-				klog.V(4).Error(err, "Failed delete route %v", route)
+				klog.V(4).ErrorS(err, "Failed delete route %v", route)
 			}
 		}
 	}
 }
+
+func (proxier *Proxier) svcAdd(obj interface{})               { proxier.EnsureRules() }
+func (proxier *Proxier) svcUpdate(oldObj, newObj interface{}) { proxier.EnsureRules() }
+func (proxier *Proxier) svcDelete(obj interface{})            { proxier.EnsureRules() }
