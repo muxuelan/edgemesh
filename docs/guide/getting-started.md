@@ -7,17 +7,14 @@
 [KubeEdge v1.7+](https://github.com/kubeedge/kubeedge/releases)
 
 ::: tip
-EdgeMesh relies on the [List-Watch](https://github.com/kubeedge/kubeedge/blob/master/CHANGELOG/CHANGELOG-1.6.md) function of KubeEdge. KubeEdge v1.6+ starts to support this function until KubeEdge v1.7+ tends to be stable
+EdgeMesh relies on the [Local APIServer](https://github.com/kubeedge/kubeedge/blob/master/CHANGELOG/CHANGELOG-1.6.md) function of KubeEdge. KubeEdge v1.6+ starts to support this function until KubeEdge v1.7+ tends to be stable
 :::
 
 ## Helm Installation
 
-- **Step 1**: Download EdgeMesh
+- **Step 1**: Enable Local APIServer
 
-```shell
-$ git clone https://github.com/kubeedge/edgemesh.git
-$ cd edgemesh
-```
+Refer to [Manual Installation-Step 3](#step3), enable Local APIServer.
 
 - **Step 2**: Install Charts
 
@@ -27,7 +24,7 @@ Make sure you have installed Helm 3
 helm install edgemesh \
   --set server.nodeName=<your node name> \
   --set server.publicIP=<your node eip> \
-  build/helm/edgemesh
+  https://raw.githubusercontent.com/kubeedge/edgemesh/main/build/helm/edgemesh.tgz
 ```
 
 server.nodeName specifies the node deployed by edgemesh-server, and server.publicIP specifies the public IP of the node. The server.publicIP can be omitted, because edgemesh-server will automatically detect and configure the public IP of the node, but it is not guaranteed to be correct.
@@ -38,7 +35,7 @@ server.nodeName specifies the node deployed by edgemesh-server, and server.publi
 helm install edgemesh \
   --set server.nodeName=k8s-node1 \
   --set server.publicIP=119.8.211.54 \
-  build/helm/edgemesh
+  https://raw.githubusercontent.com/kubeedge/edgemesh/main/build/helm/edgemesh.tgz
 ```
 
 ::: warning
@@ -80,13 +77,14 @@ $ git clone https://github.com/kubeedge/edgemesh.git
 $ cd edgemesh
 ```
 
+<a name="step3"></a>
 - **Step 2**: Create CRDs
 
 ```shell
 $ kubectl apply -f build/crds/istio/
 ```
 
-- **Step 3**: Enable List-Watch
+- **Step 3**: Enable Local APIServer
 
 At the edge node, open metaServer module (if your KubeEdge < 1.8.0, you also need to close edgeMesh module), and restart edgecore
 
@@ -122,7 +120,7 @@ modules:
 $ systemctl restart cloudcore
 ```
 
-At the edge node, check if List-Watch works
+At the edge node, check if Local APIServer works
 
 ```shell
 $ curl 127.0.0.1:10550/api/v1/services

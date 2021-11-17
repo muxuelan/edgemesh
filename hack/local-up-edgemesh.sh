@@ -109,7 +109,7 @@ localup_kubeedge() {
   token=$(sudo keadm gettoken --kube-config=${KUBECONFIG})
   echo $token
 
-  # turn off edgemesh and turn on list-watch featuren and resart edgeocre
+  # turn off edgemesh and turn on local apiserver featuren and resart edgeocre
   export CHECK_EDGECORE_ENVIRONMENT="false"
   sudo -E keadm join --cloudcore-ipport=${HOST_IP}:10000 --kubeedge-version=${KUBEEDGE_VERSION} --token=${token} --edgenode-name=${EDGE_NODENAME}
 
@@ -540,10 +540,8 @@ label_node() {
 }
 
 create_istio_crd() {
-  echo "createing the istio crd..."
-  kubectl apply -f ${EDGEMESH_ROOT}/build/crds/istio/destinationrule-crd.yaml
-  kubectl apply -f ${EDGEMESH_ROOT}/build/crds/istio/gateway-crd.yaml
-  kubectl apply -f ${EDGEMESH_ROOT}/build/crds/istio/virtualservice-crd.yaml
+  echo "creating the istio crds..."
+  kubectl apply -f ${EDGEMESH_ROOT}/build/crds/istio/
 }
 
 do_up() {

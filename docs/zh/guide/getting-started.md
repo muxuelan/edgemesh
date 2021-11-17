@@ -7,17 +7,14 @@
 [KubeEdge v1.7+](https://github.com/kubeedge/kubeedge/releases)
 
 ::: tip
-EdgeMesh 依赖于 KubeEdge 的边缘 [List-Watch](https://github.com/kubeedge/kubeedge/blob/master/CHANGELOG/CHANGELOG-1.6.md) 功能，KubeEdge v1.6+ 开始支持此功能，直到 KubeEdge v1.7+ 趋于稳定
+EdgeMesh 依赖于 KubeEdge 的边缘 [Local APIServer](https://github.com/kubeedge/kubeedge/blob/master/CHANGELOG/CHANGELOG-1.6.md) 功能，KubeEdge v1.6+ 开始支持此功能，直到 KubeEdge v1.7+ 趋于稳定
 :::
 
 ## Helm 安装
 
-- **步骤1**: 获取 EdgeMesh
+- **步骤1**: 开启 Local APIServer
 
-```shell
-$ git clone https://github.com/kubeedge/edgemesh.git
-$ cd edgemesh
-```
+参考 [手动安装-步骤3](#step3)，开启 Local APIServer。
 
 - **步骤2**: 安装 Charts
 
@@ -27,7 +24,7 @@ $ cd edgemesh
 helm install edgemesh \
   --set server.nodeName=<your node name> \
   --set server.publicIP=<your node eip> \
-  build/helm/edgemesh
+  https://raw.githubusercontent.com/kubeedge/edgemesh/main/build/helm/edgemesh.tgz
 ```
 
 server.nodeName 指定 edgemesh-server 部署的节点，server.publicIP 指定节点的公网 IP。其中 server.publicIP 是可以省略的，因为 edgemesh-server 会自动探测并配置节点的公网 IP，但不保证正确。
@@ -38,7 +35,7 @@ server.nodeName 指定 edgemesh-server 部署的节点，server.publicIP 指定�
 helm install edgemesh \
   --set server.nodeName=k8s-node1 \
   --set server.publicIP=119.8.211.54 \
-  build/helm/edgemesh
+  https://raw.githubusercontent.com/kubeedge/edgemesh/main/build/helm/edgemesh.tgz
 ```
 
 ::: warning
@@ -80,13 +77,14 @@ $ git clone https://github.com/kubeedge/edgemesh.git
 $ cd edgemesh
 ```
 
+<a name="step3"></a>
 - **步骤2**: 安装 CRDs
 
 ```shell
 $ kubectl apply -f build/crds/istio/
 ```
 
-- **步骤3**: 开启 List-Watch
+- **步骤3**: 开启 Local APIServer
 
 在边缘节点，打开 metaServer 模块（如果你的 KubeEdge < 1.8.0，还需关闭 edgeMesh 模块），并重启 edgecore
 
@@ -122,7 +120,7 @@ modules:
 $ systemctl restart cloudcore
 ```
 
-在边缘节点，测试 List-Watch 是否开启
+在边缘节点，测试 Local APIServer 是否开启
 
 ```shell
 $ curl 127.0.0.1:10550/api/v1/services
