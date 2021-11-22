@@ -5,7 +5,6 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -16,8 +15,9 @@ import (
 )
 
 const (
-	timeout = 5 * time.Second
-	retry   = 3
+	timeout     = 5 * time.Second
+	retry       = 3
+	ifconfigURL = "https://ifconfig.me"
 )
 
 // SplitServiceKey splits service name
@@ -26,14 +26,7 @@ func SplitServiceKey(key string) (name, namespace string) {
 	if len(sets) >= 2 {
 		return sets[0], sets[1]
 	}
-	ns := os.Getenv("POD_NAMESPACE")
-	if ns == "" {
-		ns = "default"
-	}
-	if len(sets) == 1 {
-		return sets[0], ns
-	}
-	return key, ns
+	return key, "default"
 }
 
 // GetInterfaceIP get net interface ipv4 address
@@ -68,7 +61,7 @@ func FetchPublicIP() string {
 	var resp *http.Response
 	var err error
 	for i := 0; i < retry; i++ {
-		resp, err = Client.Get("https://ifconfig.me")
+		resp, err = Client.Get(ifconfigURL)
 		if err == nil {
 			break
 		}
